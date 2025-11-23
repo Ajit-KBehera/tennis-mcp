@@ -1,29 +1,35 @@
 from mcp.server.fastmcp import FastMCP
-import sqlite3
+import psycopg2
 import pandas as pd
 import os
 import sys
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # Initialize the MCP Server
 mcp = FastMCP("Tennis Analyst")
 
-# PATH TO YOUR SQLITE DATA
-# Using explicit absolute path to ensure it works regardless of working directory
-DB_PATH = "/Users/ajitbehera/Codes/tennis-mcp/tennis_data.db"
+# Database configuration
+DB_HOST = os.getenv("DB_HOST", "localhost")
+DB_PORT = os.getenv("DB_PORT", "5432")
+DB_NAME = os.getenv("DB_NAME", "tennis_analytics")
+DB_USER = os.getenv("DB_USER")
+DB_PASSWORD = os.getenv("DB_PASSWORD")
 
 def get_connection():
-    """Creates a connection to the SQLite database."""
-    # check_same_thread=False is needed because MCP might call this from different threads
-    if not os.path.exists(DB_PATH):
-        error_msg = (
-            f"Could not find database at {DB_PATH}\n"
-            f"Current working directory: {os.getcwd()}\n"
-            f"Script location: {os.path.abspath(__file__) if '__file__' in globals() else 'unknown'}\n"
-            f"Please ensure tennis_data.db exists at: /Users/ajitbehera/Codes/tennis-mcp/tennis_data.db"
-        )
-        raise FileNotFoundError(error_msg)
+    """Creates a connection to the PostgreSQL database."""
+    if not DB_USER or not DB_PASSWORD:
+         raise ValueError("DB_USER and DB_PASSWORD environment variables must be set.")
     
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = psycopg2.connect(
+        host=DB_HOST,
+        port=DB_PORT,
+        dbname=DB_NAME,
+        user=DB_USER,
+        password=DB_PASSWORD
+    )
     return conn
 
 @mcp.tool()
@@ -36,8 +42,12 @@ def get_database_schema() -> str:
         conn = get_connection()
         cursor = conn.cursor()
         try:
-            # Get list of tables
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+            # Get list of tables in public schema
+            cursor.execute("""
+                SELECT table_name 
+                FROM information_schema.tables 
+                WHERE table_schema = 'public'
+            """)
             tables = cursor.fetchall()
             
             schema_info = []
@@ -45,21 +55,23 @@ def get_database_schema() -> str:
             for table in tables:
                 table_name = table[0]
                 # Get column info for each table
-                cursor.execute(f"PRAGMA table_info({table_name})")
+                cursor.execute("""
+                    SELECT column_name, data_type 
+                    FROM information_schema.columns 
+                    WHERE table_name = %s
+                    ORDER BY ordinal_position
+                """, (table_name,))
                 columns = cursor.fetchall()
                 
                 # Format: column_name (type)
-                # row[1] is name, row[2] is type in SQLite PRAGMA output
-                col_str = ", ".join([f"{col[1]} ({col[2]})" for col in columns])
+                col_str = ", ".join([f"{col[0]} ({col[1]})" for col in columns])
                 schema_info.append(f"Table '{table_name}': {col_str}")
             
             return "\n".join(schema_info)
         finally:
             conn.close()
-    except FileNotFoundError as e:
-        return f"Database Error: {str(e)}\n\nPlease verify that tennis_data.db exists at: {DB_PATH}"
     except Exception as e:
-        return f"Error getting schema: {str(e)}\n\nDatabase path: {DB_PATH}\nCurrent directory: {os.getcwd()}"
+        return f"Error getting schema: {str(e)}"
 
 @mcp.tool()
 def run_sql_query(query: str) -> str:
@@ -69,7 +81,7 @@ def run_sql_query(query: str) -> str:
     ALWAYS check the schema using get_database_schema before writing a query.
     """
     # Basic safety check
-    if any(keyword in query.upper() for keyword in ["INSERT", "UPDATE", "DELETE", "DROP", "ALTER"]):
+    if any(keyword in query.upper() for keyword in ["INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "TRUNCATE", "GRANT", "REVOKE"]):
         return "Error: Only SELECT queries are allowed for safety."
 
     try:
@@ -88,28 +100,22 @@ def run_sql_query(query: str) -> str:
             return df.to_markdown(index=False)
         finally:
             conn.close()
-    except FileNotFoundError as e:
-        return f"Database Error: {str(e)}\n\nPlease verify that tennis_data.db exists at: {DB_PATH}"
     except Exception as e:
-        return f"SQL Error: {str(e)}\n\nDatabase path: {DB_PATH}\nCurrent directory: {os.getcwd()}"
+        return f"SQL Error: {str(e)}"
 
 if __name__ == "__main__":
-    # Verify database exists before starting server
-    if not os.path.exists(DB_PATH):
-        print(f"ERROR: Database not found at {DB_PATH}", file=sys.stderr)
-        print(f"Current working directory: {os.getcwd()}", file=sys.stderr)
-        print(f"Please ensure tennis_data.db exists at the path above.", file=sys.stderr)
-        sys.exit(1)
-    
     # Test connection
     try:
+        if not DB_USER or not DB_PASSWORD:
+             print("WARNING: DB_USER or DB_PASSWORD not set. Please set them in .env file or environment variables.", file=sys.stderr)
+        
         test_conn = get_connection()
         test_conn.close()
-        print(f"✓ Database connection verified: {DB_PATH}", file=sys.stderr)
+        print(f"✓ Database connection verified: postgresql://{DB_HOST}:{DB_PORT}/{DB_NAME}", file=sys.stderr)
     except Exception as e:
         print(f"ERROR: Could not connect to database: {e}", file=sys.stderr)
         sys.exit(1)
     
     # Run the server
-    print(f"Serving Tennis Analyst on {DB_PATH}...", file=sys.stderr)
+    print(f"Serving Tennis Analyst on postgresql://{DB_HOST}:{DB_PORT}/{DB_NAME}...", file=sys.stderr)
     mcp.run(transport='stdio')
