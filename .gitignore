@@ -3,3 +3,11 @@ venv/
 __pycache__/
 *.pyc
 .env
+*.db*
+*.sqlite*
+*.sqlite3*
+*.db-journal
+*.db-*
+*.db_tmp
+
+.DS_Store
